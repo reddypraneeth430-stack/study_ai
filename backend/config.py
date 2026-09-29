@@ -27,7 +27,7 @@ class Settings(BaseSettings):
         default="qwen2.5:7b", env="OLLAMA_MODEL"
     )
     ollama_timeout_seconds: int = Field(
-        default=120, env="OLLAMA_TIMEOUT_SECONDS"
+        default=300, env="OLLAMA_TIMEOUT_SECONDS"
     )
 
     # Database

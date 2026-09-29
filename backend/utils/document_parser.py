@@ -101,6 +101,7 @@ def extract_text_from_txt(file_path: Path) -> tuple[str, int]:
     """
     encodings = ["utf-8", "utf-16", "latin-1", "cp1252"]
 
+    decoded_empty = False
     for encoding in encodings:
         try:
             content = file_path.read_text(encoding=encoding)
@@ -108,10 +109,15 @@ def extract_text_from_txt(file_path: Path) -> tuple[str, int]:
                 # Rough estimate: 3000 chars per "page"
                 page_estimate = max(1, len(content) // 3000)
                 return content, page_estimate
+            else:
+                decoded_empty = True
         except (UnicodeDecodeError, UnicodeError):
             continue
         except Exception as exc:
             raise DocumentParseError(f"Cannot read text file: {exc}") from exc
+
+    if decoded_empty:
+        raise DocumentParseError("The text file is empty or contains only whitespace.")
 
     raise DocumentParseError(
         "Could not decode the text file. Ensure it is a valid UTF-8 or Latin-1 file."

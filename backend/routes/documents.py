@@ -77,6 +77,7 @@ async def upload_document(
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """Upload a PDF, DOCX, or TXT study material."""
+    logger.info("Upload request received: filename='%s'", file.filename)
     content = await file.read()
     doc = await save_document(file, content, db)
 
@@ -85,6 +86,8 @@ async def upload_document(
         select(ExtractedContent).where(ExtractedContent.document_id == doc.id)
     )
     extracted = result.scalar_one_or_none()
+    word_count = extracted.word_count if extracted else None
+    logger.info("Document saved successfully: doc_id=%s, word_count=%s", doc.id, word_count)
 
     return {
         "message": "Document uploaded and processed successfully.",
@@ -128,15 +131,19 @@ async def generate_summary(
     """Generate an AI summary for the specified document."""
     # Get the document text
     text = await get_document_text(document_id, db)
+    logger.info("Summary requested for document_id=%s (text_length=%d chars)", document_id, len(text))
 
     # Call Ollama
     try:
         summary_data = await ollama_service.generate_summary(text)
     except OllamaConnectionError as exc:
+        logger.error("Ollama connection error for document_id=%s: %s", document_id, exc)
         raise HTTPException(status_code=503, detail=str(exc))
     except OllamaModelNotFoundError as exc:
+        logger.error("Ollama model not found for document_id=%s: %s", document_id, exc)
         raise HTTPException(status_code=503, detail=str(exc))
     except OllamaAPIError as exc:
+        logger.error("Ollama API error for document_id=%s: %s", document_id, exc)
         raise HTTPException(status_code=502, detail=str(exc))
 
     # Persist summaries back to ExtractedContent
@@ -151,6 +158,8 @@ async def generate_summary(
         key_points = summary_data.get("key_points", [])
         extracted.key_points = json.dumps(key_points)
         await db.commit()
+
+    logger.info("Summary generated successfully for document_id=%s", document_id)
 
     return SummaryResponse(
         document_id=document_id,

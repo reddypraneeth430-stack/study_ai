@@ -100,6 +100,13 @@ async def save_document(
         file_path.unlink(missing_ok=True)
         raise HTTPException(status_code=422, detail=str(exc))
 
+    if not raw_text or not raw_text.strip():
+        file_path.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=422,
+            detail="The uploaded document contains no readable text.",
+        )
+
     word_count = count_words(raw_text)
 
     # Persist Document record

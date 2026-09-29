@@ -40,7 +40,59 @@ class OllamaService:
     def __init__(self):
         self.base_url = settings.ollama_base_url.rstrip("/")
         self.model = settings.ollama_model
-        self.timeout = settings.ollama_timeout_seconds
+
+    @property
+    def timeout(self) -> float:
+        """
+        Configurable Ollama request timeout in seconds with a safe fallback.
+        Reads from settings or environment variable OLLAMA_TIMEOUT_SECONDS.
+        Never returns <= 0 or None to prevent disabling timeout protection.
+        """
+        import os
+        fallback = 300.0
+        try:
+            raw_val = os.getenv("OLLAMA_TIMEOUT_SECONDS")
+            if raw_val is not None and raw_val.strip():
+                val = float(raw_val.strip())
+            else:
+                val = float(getattr(settings, "ollama_timeout_seconds", fallback))
+            return val if val > 0 else fallback
+        except (ValueError, TypeError):
+            return fallback
+
+    @staticmethod
+    def _prepare_summary_text(document_text: str, max_chars: int = 4500) -> str:
+        """
+        Intelligently sample or truncate document text for summarization.
+        If document is within max_chars, use full text.
+        If document exceeds max_chars, extract a representative composite:
+        - Introduction / Beginning: ~2,000 characters
+        - Core Middle Section: ~1,500 characters
+        - Conclusion / Summary Section: ~1,000 characters
+        This provides complete coverage of the document while keeping prompt token
+        processing under ~1,000 tokens for fast CPU inference.
+        """
+        clean_text = document_text.strip()
+        if len(clean_text) <= max_chars:
+            return clean_text
+
+        intro_len = 2000
+        middle_len = 1500
+        end_len = 1000
+
+        intro_part = clean_text[:intro_len].strip()
+
+        mid_start = max(intro_len, (len(clean_text) - middle_len) // 2)
+        mid_part = clean_text[mid_start : mid_start + middle_len].strip()
+
+        end_start = max(mid_start + middle_len, len(clean_text) - end_len)
+        end_part = clean_text[end_start:].strip()
+
+        return (
+            f"[Document Overview / Beginning]\n{intro_part}\n\n"
+            f"[... Key Excerpt from Document Body ...]\n{mid_part}\n\n"
+            f"[... Concluding Sections ...]\n{end_part}"
+        )
 
     async def check_health(self) -> dict[str, Any]:
         """
@@ -130,8 +182,9 @@ class OllamaService:
         if response_format == "json":
             payload["format"] = "json"
 
+        timeout_config = httpx.Timeout(self.timeout, connect=15.0)
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+            async with httpx.AsyncClient(timeout=timeout_config) as client:
                 response = await client.post(
                     f"{self.base_url}/api/chat",
                     json=payload,
@@ -159,9 +212,9 @@ class OllamaService:
             ) from exc
 
         except httpx.TimeoutException as exc:
-            logger.error("Ollama request timed out after %ss: %s", self.timeout, exc)
+            logger.error("Ollama request timed out after %ds: %s", int(self.timeout), exc)
             raise OllamaAPIError(
-                f"Ollama took too long to respond ({self.timeout}s timeout). "
+                f"Ollama took too long to respond ({int(self.timeout)}s timeout). "
                 "Try again with a shorter prompt or reduce document length."
             ) from exc
 
@@ -221,7 +274,15 @@ class OllamaService:
         Returns:
             dict with keys: quick_summary, detailed_summary, key_points
         """
-        truncated = document_text[:12000]
+        if not document_text or not document_text.strip():
+            raise OllamaAPIError("Cannot generate summary: document text is empty.")
+
+        prepared_text = self._prepare_summary_text(document_text, max_chars=4500)
+        logger.info(
+            "Prepared summary text for model: input_len=%d chars (original=%d chars)",
+            len(prepared_text),
+            len(document_text),
+        )
 
         system_prompt = (
             "You are an expert academic assistant. "
@@ -231,13 +292,13 @@ class OllamaService:
         )
 
         user_prompt = f"""Analyze this study material and return a JSON object with:
-- "quick_summary": A 2-3 sentence overview (plain text).
-- "detailed_summary": A thorough paragraph-by-paragraph summary (plain text).
-- "key_points": A JSON array of 5-10 important bullet points (each as a string).
+- "quick_summary": A concise 2-3 sentence overview (plain text).
+- "detailed_summary": A structured 2-3 paragraph summary covering key concepts and explanations (plain text).
+- "key_points": A JSON array of 5-8 essential bullet points (each as a string).
 
 Study Material:
 \"\"\"
-{truncated}
+{prepared_text}
 \"\"\"
 
 Return ONLY valid JSON. No markdown backticks, no explanations outside JSON."""
@@ -248,7 +309,7 @@ Return ONLY valid JSON. No markdown backticks, no explanations outside JSON."""
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.3,
-            max_tokens=2048,
+            max_tokens=768,
             response_format="json",
         )
 
@@ -263,10 +324,23 @@ Return ONLY valid JSON. No markdown backticks, no explanations outside JSON."""
             cleaned = cleaned.strip()
 
             data = json.loads(cleaned)
+            if isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict):
+                data = data[0]
+            elif not isinstance(data, dict):
+                data = {}
+
+            key_points_raw = data.get("key_points", [])
+            if isinstance(key_points_raw, str):
+                key_points = [k.strip() for k in key_points_raw.split("\n") if k.strip()]
+            elif isinstance(key_points_raw, list):
+                key_points = [str(k) for k in key_points_raw if k]
+            else:
+                key_points = []
+
             return {
-                "quick_summary": data.get("quick_summary", ""),
-                "detailed_summary": data.get("detailed_summary", ""),
-                "key_points": data.get("key_points", []),
+                "quick_summary": str(data.get("quick_summary", "")),
+                "detailed_summary": str(data.get("detailed_summary", "")),
+                "key_points": key_points,
             }
         except json.JSONDecodeError:
             logger.warning("Ollama returned non-JSON for summary; fallback wrapping.")

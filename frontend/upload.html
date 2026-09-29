@@ -174,11 +174,23 @@
 
     try {
       const data = await apiFetch('/documents/upload', { method: 'POST', body: formData });
-      showToast(`✅ "${data.document.original_filename}" uploaded successfully!`, 'success');
+      showToast(`✅ "${data.document.original_filename}" uploaded successfully! Generating analysis…`, 'success');
       clearFile();
-      loadDocuments();
+      await loadDocuments();
+      generateSummary(data.document.id, data.document.original_filename);
     } catch (err) {
-      showToast('Upload failed: ' + err.message, 'error');
+      console.error('Upload failed:', err);
+      let errMsg = err.message;
+      if (err.isNetworkError) {
+        errMsg = `Cannot reach backend on port 8000. Please start the server: uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000`;
+      } else if (err.status === 400 || err.status === 422) {
+        errMsg = `Invalid Document: ${err.message}`;
+      } else if (err.status === 413) {
+        errMsg = `File Too Large: ${err.message}`;
+      } else if (err.status === 500) {
+        errMsg = `Internal Server Error: ${err.message}`;
+      }
+      showToast(errMsg, 'error', 6000);
     } finally {
       setLoading(btn, false);
     }
@@ -274,7 +286,26 @@
             </ul>
           </div>` : ''}`;
     } catch (err) {
-      content.innerHTML = `<div class="text-muted" style="padding:20px;">Error: ${err.message}</div>`;
+      console.error('Summary generation failed:', err);
+      let heading = 'Summary Failed';
+      let details = err.message;
+      if (err.isNetworkError) {
+        heading = 'Connection Error';
+        details = 'Could not communicate with the backend. Ensure FastAPI is running on port 8000.';
+      } else if (err.status === 503) {
+        heading = 'AI Service Unavailable';
+        details = `Ollama or the model 'qwen2.5:7b' is not accessible: ${err.message}`;
+      } else if (err.status === 502) {
+        heading = 'AI Generation Error';
+        details = `The AI model failed to produce a valid response: ${err.message}`;
+      }
+      content.innerHTML = `
+        <div style="padding:16px 20px;background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.3);border-radius:var(--radius-md);">
+          <div style="font-weight:600;color:var(--accent-rose);margin-bottom:6px;display:flex;align-items:center;gap:6px;">
+            <span>⚠️</span> <span>${heading}</span>
+          </div>
+          <div style="color:var(--text-secondary);font-size:0.875rem;line-height:1.6;">${details}</div>
+        </div>`;
     }
   }
 

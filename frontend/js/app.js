@@ -3,7 +3,17 @@
  * Shared functions used across all pages.
  */
 
-const API_BASE = '/api';
+// If frontend is accessed from a different port (e.g. 5500 via http.server) or file://,
+// route API requests to the FastAPI backend on 127.0.0.1:8000.
+const API_BASE = (() => {
+  if (typeof window !== 'undefined' && window.location) {
+    const { protocol, port } = window.location;
+    if (protocol === 'file:' || (port && port !== '8000')) {
+      return 'http://127.0.0.1:8000/api';
+    }
+  }
+  return '/api';
+})();
 
 // ============================================================
 // API Helper
@@ -11,23 +21,58 @@ const API_BASE = '/api';
 
 async function apiFetch(path, options = {}) {
   const url = `${API_BASE}${path}`;
-  const defaults = {
-    headers: { 'Content-Type': 'application/json' },
-  };
-  const config = { ...defaults, ...options };
-  if (config.body && typeof config.body === 'object' && !(config.body instanceof FormData)) {
-    config.body = JSON.stringify(config.body);
-  }
+  const config = { ...options };
+
+  // Setup headers safely without mutating shared objects
   if (config.body instanceof FormData) {
-    delete config.headers['Content-Type'];
+    const headers = { ...(config.headers || {}) };
+    delete headers['Content-Type'];
+    delete headers['content-type'];
+    if (Object.keys(headers).length > 0) {
+      config.headers = headers;
+    } else {
+      delete config.headers;
+    }
+  } else {
+    config.headers = {
+      'Content-Type': 'application/json',
+      ...(config.headers || {}),
+    };
+    if (config.body && typeof config.body === 'object') {
+      config.body = JSON.stringify(config.body);
+    }
   }
 
-  const response = await fetch(url, config);
-  const data = await response.json().catch(() => ({ detail: 'Invalid server response.' }));
+  let response;
+  try {
+    response = await fetch(url, config);
+  } catch (networkErr) {
+    console.error(`[API Network Error] ${config.method || 'GET'} ${url}:`, networkErr);
+    const err = new Error(
+      `Cannot connect to backend server at ${API_BASE}. Ensure the FastAPI server is running on http://127.0.0.1:8000.`
+    );
+    err.isNetworkError = true;
+    throw err;
+  }
+
+  let data;
+  try {
+    data = await response.json();
+  } catch {
+    data = { detail: `HTTP ${response.status}: Non-JSON server response` };
+  }
 
   if (!response.ok) {
-    throw new Error(data.detail || `HTTP ${response.status}`);
+    let msg = data.detail || `Server error (${response.status})`;
+    if (typeof msg !== 'string') {
+      try { msg = JSON.stringify(msg); } catch { msg = `HTTP ${response.status}`; }
+    }
+    const err = new Error(msg);
+    err.status = response.status;
+    err.data = data;
+    throw err;
   }
+
   return data;
 }
 

@@ -102,6 +102,44 @@ async def test_upload_txt_document(client):
 
 
 @pytest.mark.asyncio
+async def test_upload_pdf_document(client):
+    """Upload a valid PDF document and verify extraction."""
+    import fitz
+    pdf_doc = fitz.open()
+    page = pdf_doc.new_page()
+    page.insert_text((50, 72), "Machine Learning allows computers to learn patterns from data.")
+    pdf_bytes = pdf_doc.tobytes()
+
+    response = await client.post(
+        "/api/documents/upload",
+        files={"file": ("test_doc.pdf", io.BytesIO(pdf_bytes), "application/pdf")},
+    )
+    assert response.status_code == 201
+    data = response.json()
+    assert data["document"]["file_type"] == "pdf"
+    assert data["document"]["word_count"] > 0
+
+
+@pytest.mark.asyncio
+async def test_upload_docx_document(client):
+    """Upload a valid DOCX document and verify extraction."""
+    import docx
+    docx_doc = docx.Document()
+    docx_doc.add_paragraph("Supervised learning uses labeled data to train machine learning models.")
+    buf = io.BytesIO()
+    docx_doc.save(buf)
+
+    response = await client.post(
+        "/api/documents/upload",
+        files={"file": ("test_doc.docx", io.BytesIO(buf.getvalue()), "application/vnd.openxmlformats-officedocument.wordprocessingml.document")},
+    )
+    assert response.status_code == 201
+    data = response.json()
+    assert data["document"]["file_type"] == "docx"
+    assert data["document"]["word_count"] > 0
+
+
+@pytest.mark.asyncio
 async def test_upload_unsupported_file_type(client):
     """Upload an unsupported file type should return 400."""
     content = b"data"
@@ -232,3 +270,47 @@ async def test_ollama_service_health():
     assert "reachable" in health
     assert "model_available" in health
     assert health["configured_model"] == "qwen2.5:7b"
+
+
+@pytest.mark.asyncio
+async def test_document_summary_endpoint(client, monkeypatch):
+    """Test generating a document summary via the API."""
+    from backend.services.ollama_service import ollama_service
+
+    async def mock_generate_summary(text, summary_type="quick"):
+        return {
+            "quick_summary": "Quick mock summary.",
+            "detailed_summary": "Detailed mock summary.",
+            "key_points": ["Key point 1", "Key point 2"],
+        }
+
+    monkeypatch.setattr(ollama_service, "generate_summary", mock_generate_summary)
+
+    # Upload test document
+    content = b"Machine Learning allows computers to learn patterns from data."
+    upload_res = await client.post(
+        "/api/documents/upload",
+        files={"file": ("ml_notes.txt", io.BytesIO(content), "text/plain")},
+    )
+    assert upload_res.status_code == 201
+    doc_id = upload_res.json()["document"]["id"]
+
+    # Request summary
+    summary_res = await client.post(f"/api/documents/{doc_id}/summary")
+    assert summary_res.status_code == 200
+    data = summary_res.json()
+    assert data["document_id"] == doc_id
+    assert data["quick_summary"] == "Quick mock summary."
+    assert len(data["key_points"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_upload_whitespace_file(client):
+    """Upload a file with only whitespace should fail validation."""
+    content = b"    \n\t   "
+    response = await client.post(
+        "/api/documents/upload",
+        files={"file": ("whitespace.txt", io.BytesIO(content), "text/plain")},
+    )
+    assert response.status_code in (400, 422)
+
